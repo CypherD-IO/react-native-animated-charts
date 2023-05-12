@@ -1,11 +1,12 @@
 {
-  "name": "@rainbow-me/animated-charts",
-  "version": "1.0.0-alpha.6",
+  "name": "@cypherd-io/animated-charts",
+  "version": "2.0.0",
   "description": "The library provides a set of components and helpers for building complex and beautiful animated linear (only - for now) charts. It's a part of the [Rainbow.me project](https://rainbow.me/).",
   "main": "src/index.js",
   "scripts": {
     "release": "release-it"
   },
+  
   "author": "Michał Osadnik",
   "files": [
     "src/"
@@ -36,10 +37,14 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/rainbow-me/react-native-animated-charts.git"
+    "url": "git+https://github.com/CypherD-IO/react-native-animated-charts.git"
   },
+  "homepage": "https://github.com/CypherD-IO/react-native-animated-charts#readme",
   "bugs": {
-    "url": "https://github.com/rainbow-me/react-native-animated-charts/issues"
+    "url": "https://github.com/CypherD-IO/react-native-animated-charts/issues"
   },
-  "homepage": "https://github.com/rainbow-me/react-native-animated-charts#readme"
+  "publishConfig": {
+      "access": "public"
+  }
+  
 }
