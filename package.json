@@ -6,7 +6,6 @@
   "scripts": {
     "release": "release-it"
   },
-  
   "author": "Michał Osadnik",
   "files": [
     "src/"
@@ -44,7 +43,6 @@
     "url": "https://github.com/CypherD-IO/react-native-animated-charts/issues"
   },
   "publishConfig": {
-      "access": "public"
+    "access": "public"
   }
-  
 }
