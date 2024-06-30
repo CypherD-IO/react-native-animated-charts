@@ -1,6 +1,6 @@
 {
   "name": "@cypherd-io/animated-charts",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "description": "The library provides a set of components and helpers for building complex and beautiful animated linear (only - for now) charts. It's a part of the [Rainbow.me project](https://rainbow.me/).",
   "main": "src/index.js",
   "scripts": {
@@ -20,7 +20,7 @@
     "react-native-gesture-handler": "^1.7.0",
     "react-native-haptic-feedback": "^1.10.0",
     "react-native-reanimated": "3.4.2",
-    "react-native-svg": "^12.1.0"
+    "react-native-svg": "^15.3.0"
   },
   "peerDependencies": {
     "react": "*",
