@@ -6,11 +6,10 @@ import React, {
   useState,
 } from 'react';
 import { Platform } from 'react-native';
-import { LongPressGestureHandler } from 'react-native-gesture-handler';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import ReactNativeHapticFeedback from 'react-native-haptic-feedback';
 import Animated, {
   runOnJS,
-  useAnimatedGestureHandler,
   useAnimatedStyle,
   useDerivedValue,
   useSharedValue,
@@ -54,6 +53,33 @@ const timingFeedbackDefaultConfig = {
 
 const timingAnimationDefaultConfig = {
   duration: 300,
+};
+
+/**
+ * We previously exposed gesture state numbers coming from RNGH's old handler API
+ * (`LongPressGestureHandler` + `useAnimatedGestureHandler`).
+ *
+ * Reanimated v4 migration uses RNGH v2 "Gesture API" (`GestureDetector`) which
+ * doesn't expose the same numeric `event.state`.
+ *
+ * We keep writing compatible numeric values to `state.value` for backwards
+ * compatibility with any consumer code that might rely on it.
+ *
+ * RNGH State enum (historical):
+ * - UNDETERMINED = 0
+ * - FAILED = 1
+ * - BEGAN = 2
+ * - CANCELLED = 3
+ * - ACTIVE = 4
+ * - END = 5
+ */
+const RNGH_STATE = {
+  UNDETERMINED: 0,
+  FAILED: 1,
+  BEGAN: 2,
+  CANCELLED: 3,
+  ACTIVE: 4,
+  END: 5,
 };
 
 function combineConfigs(a, b) {
@@ -133,6 +159,43 @@ function positionXWithMargin(x, margin, width) {
     return Math.min(margin + x * 2 - width, width);
   } else {
     return x;
+  }
+}
+
+function resetScrubInteraction(
+  isStarted,
+  state,
+  originalX,
+  originalY,
+  dotScale,
+  pathOpacity,
+  springConfig,
+  timingFeedbackConfig,
+  hapticsEnabledValue,
+  nextState
+) {
+  'worklet';
+  isStarted.value = false;
+  state.value = nextState;
+  originalX.value = '';
+  originalY.value = '';
+  dotScale.value = withSpring(
+    0,
+    combineConfigs(springDefaultConfig, springConfig)
+  );
+  if (android) {
+    pathOpacity.value = 1;
+  } else {
+    pathOpacity.value = withTiming(
+      1,
+      combineConfigs(timingFeedbackDefaultConfig, timingFeedbackConfig)
+    );
+  }
+
+  // Keep the old behavior: on successful end we trigger haptics (if enabled).
+  // Callers that want haptics should do it explicitly (so cancel/fail won't).
+  if (hapticsEnabledValue && hapticsEnabledValue.value) {
+    // no-op here; see caller
   }
 }
 
@@ -274,9 +337,28 @@ export default function ChartPathProvider({
 
   const isStarted = useSharedValue(false, 'isStarted');
 
-  const onLongPressGestureEvent = useAnimatedGestureHandler({
-    onActive: event => {
-      state.value = event.state;
+  /**
+   * RNGH Gesture API (Reanimated v4 friendly)
+   *
+   * We use a `Pan` gesture with `minDistance(0)` because it provides continuous
+   * updates while the finger moves. This replaces the old
+   * `LongPressGestureHandler` configuration (`minDurationMs: 0`) which was
+   * effectively "press and scrub immediately".
+   */
+  const panGesture = Gesture.Pan()
+    .minDistance(0)
+    // Keep old behaviour: do not cancel when leaving the view bounds.
+    .shouldCancelWhenOutside(false)
+    .onBegin(() => {
+      'worklet';
+      state.value = RNGH_STATE.BEGAN;
+    })
+    .onStart(event => {
+      'worklet';
+      // We treat this as "active" and make sure progress is fully resolved,
+      // matching the previous Android-only `onStart` workaround.
+      state.value = RNGH_STATE.ACTIVE;
+      progress.value = 1;
       if (!currData.value || currData.value.length === 0) {
         return;
       }
@@ -319,8 +401,9 @@ export default function ChartPathProvider({
         const prevLastX = currData.value[currData.value.length - 2].x;
         const lastY = currData.value[currData.value.length - 1].y;
         const lastX = currData.value[currData.value.length - 1].x;
-        const progress = (eventX / width - prevLastX) / (lastX - prevLastX);
-        positionY.value = (prevLastY + progress * (lastY - prevLastY)) * height;
+        const progressLocal = (eventX / width - prevLastX) / (lastX - prevLastX);
+        positionY.value =
+          (prevLastY + progressLocal * (lastY - prevLastY)) * height;
       } else if (idx === 0) {
         positionY.value = getValue(currData, idx, ss).y * height;
       } else {
@@ -342,137 +425,117 @@ export default function ChartPathProvider({
         curroriginalData
       );
       positionX.value = eventX;
-    },
-    onCancel: event => {
-      isStarted.value = false;
-      state.value = event.state;
-      originalX.value = '';
-      originalY.value = '';
-      dotScale.value = withSpring(
-        0,
-        combineConfigs(springDefaultConfig, springConfig)
-      );
-      if (android) {
-        pathOpacity.value = 1;
-      } else {
-        pathOpacity.value = withTiming(
+    })
+    .onUpdate(event => {
+      'worklet';
+      state.value = RNGH_STATE.ACTIVE;
+      if (!currData.value || currData.value.length === 0) {
+        return;
+      }
+      if (!isStarted.value) {
+        dotScale.value = withSpring(
           1,
+          combineConfigs(springDefaultConfig, springConfig)
+        );
+        pathOpacity.value = withTiming(
+          0,
           combineConfigs(timingFeedbackDefaultConfig, timingFeedbackConfig)
         );
       }
-    },
-    onEnd: event => {
-      isStarted.value = false;
-      state.value = event.state;
-      originalX.value = '';
-      originalY.value = '';
-      dotScale.value = withSpring(
-        0,
-        combineConfigs(springDefaultConfig, springConfig)
-      );
-      if (android) {
-        pathOpacity.value = 1;
-      } else {
-        pathOpacity.value = withTiming(
-          1,
-          combineConfigs(timingFeedbackDefaultConfig, timingFeedbackConfig)
-        );
+
+      if (hapticsEnabledValue.value && !isStarted.value) {
+        impactHeavy();
       }
+      isStarted.value = true;
+
+      const eventX = positionXWithMargin(event.x, hitSlopValue.value, width);
+
+      let idx = 0;
+      const ss = smoothingStrategy;
+      for (let i = 0; i < currData.value.length; i++) {
+        if (getValue(currData, i, ss).x > eventX / width) {
+          idx = i;
+          break;
+        }
+        if (i === currData.value.length - 1) {
+          idx = currData.value.length - 1;
+        }
+      }
+
+      if (
+        ss.value === 'bezier' &&
+        currData.value.length > 30 &&
+        eventX / width >= currData.value[currData.value.length - 2].x
+      ) {
+        const prevLastY = currData.value[currData.value.length - 2].y;
+        const prevLastX = currData.value[currData.value.length - 2].x;
+        const lastY = currData.value[currData.value.length - 1].y;
+        const lastX = currData.value[currData.value.length - 1].x;
+        const progressLocal = (eventX / width - prevLastX) / (lastX - prevLastX);
+        positionY.value =
+          (prevLastY + progressLocal * (lastY - prevLastY)) * height;
+      } else if (idx === 0) {
+        positionY.value = getValue(currData, idx, ss).y * height;
+      } else {
+        // prev + diff over X
+        positionY.value =
+          (getValue(currData, idx - 1, ss).y +
+            (getValue(currData, idx, ss).y -
+              getValue(currData, idx - 1, ss).y) *
+              ((eventX / width - getValue(currData, idx - 1, ss).x) /
+                (getValue(currData, idx, ss).x -
+                  getValue(currData, idx - 1, ss).x))) *
+          height;
+      }
+
+      setoriginalXYAccordingToPosition(
+        originalX,
+        originalY,
+        eventX / width,
+        curroriginalData
+      );
+      positionX.value = eventX;
+    })
+    .onEnd(() => {
+      'worklet';
+      resetScrubInteraction(
+        isStarted,
+        state,
+        originalX,
+        originalY,
+        dotScale,
+        pathOpacity,
+        springConfig,
+        timingFeedbackConfig,
+        hapticsEnabledValue,
+        RNGH_STATE.END
+      );
 
       if (hapticsEnabledValue.value) {
         impactHeavy();
       }
-    },
-    onFail: event => {
-      isStarted.value = false;
-      state.value = event.state;
-      originalX.value = '';
-      originalY.value = '';
-      dotScale.value = withSpring(
-        0,
-        combineConfigs(springDefaultConfig, springConfig)
-      );
-      if (android) {
-        pathOpacity.value = 1;
-      } else {
-        pathOpacity.value = withTiming(
-          1,
-          combineConfigs(timingFeedbackDefaultConfig, timingFeedbackConfig)
-        );
-      }
-    },
-    onStart: event => {
-      // WARNING: the following code does not run on using iOS, but it does on Android.
-      // I use the same code from onActive except of "progress.value = 1" which was taken from the original onStart.
-      state.value = event.state;
-      if (!currData.value || currData.value.length === 0) {
+    })
+    .onFinalize((_event, success) => {
+      'worklet';
+      if (success) {
+        // `onEnd` handles success already.
         return;
       }
-      if (!isStarted.value) {
-        dotScale.value = withSpring(
-          1,
-          combineConfigs(springDefaultConfig, springConfig)
-        );
-        pathOpacity.value = withTiming(
-          0,
-          combineConfigs(timingFeedbackDefaultConfig, timingFeedbackConfig)
-        );
-      }
 
-      if (hapticsEnabledValue.value && !isStarted.value) {
-        impactHeavy();
-      }
-      isStarted.value = true;
-
-      const eventX = positionXWithMargin(event.x, hitSlopValue.value, width);
-
-      progress.value = 1;
-      let idx = 0;
-      const ss = smoothingStrategy;
-      for (let i = 0; i < currData.value.length; i++) {
-        if (getValue(currData, i, ss).x > eventX / width) {
-          idx = i;
-          break;
-        }
-        if (i === currData.value.length - 1) {
-          idx = currData.value.length - 1;
-        }
-      }
-
-      if (
-        ss.value === 'bezier' &&
-        currData.value.length > 30 &&
-        eventX / width >= currData.value[currData.value.length - 2].x
-      ) {
-        const prevLastY = currData.value[currData.value.length - 2].y;
-        const prevLastX = currData.value[currData.value.length - 2].x;
-        const lastY = currData.value[currData.value.length - 1].y;
-        const lastX = currData.value[currData.value.length - 1].x;
-        const progress = (eventX / width - prevLastX) / (lastX - prevLastX);
-        positionY.value = (prevLastY + progress * (lastY - prevLastY)) * height;
-      } else if (idx === 0) {
-        positionY.value = getValue(currData, idx, ss).y * height;
-      } else {
-        // prev + diff over X
-        positionY.value =
-          (getValue(currData, idx - 1, ss).y +
-            (getValue(currData, idx, ss).y -
-              getValue(currData, idx - 1, ss).y) *
-              ((eventX / width - getValue(currData, idx - 1, ss).x) /
-                (getValue(currData, idx, ss).x -
-                  getValue(currData, idx - 1, ss).x))) *
-          height;
-      }
-
-      setoriginalXYAccordingToPosition(
+      // Cancel / fail path
+      resetScrubInteraction(
+        isStarted,
+        state,
         originalX,
         originalY,
-        eventX / width,
-        curroriginalData
+        dotScale,
+        pathOpacity,
+        springConfig,
+        timingFeedbackConfig,
+        hapticsEnabledValue,
+        RNGH_STATE.CANCELLED
       );
-      positionX.value = eventX;
-    },
-  });
+    });
 
   const dotStyle = useAnimatedStyle(
     () => ({
@@ -495,7 +558,7 @@ export default function ChartPathProvider({
         data,
         dotStyle,
         extremes,
-        onLongPressGestureEvent,
+        gesture: panGesture,
         originalX,
         originalY,
         pathOpacity,
@@ -522,7 +585,7 @@ function ChartPath({
   gestureEnabled = true,
   selectedOpacity = 0.7,
   style,
-  onLongPressGestureEvent,
+  gesture,
   prevData,
   currData,
   smoothingStrategy,
@@ -674,6 +737,11 @@ function ChartPath({
     };
   }, undefined);
 
+  // Keep prop around for backwards compatibility (no-op for GestureDetector).
+  // Previously this was spread onto `LongPressGestureHandler`.
+  // eslint-disable-next-line no-unused-vars
+  const _unusedLongPressGestureHandlerProps = longPressGestureHandlerProps;
+
   return (
     <InternalContext.Provider
       value={{
@@ -682,8 +750,7 @@ function ChartPath({
         animatedStyle,
         gestureEnabled,
         height,
-        longPressGestureHandlerProps,
-        onLongPressGestureEvent,
+        gesture,
         props,
         style,
         width,
@@ -703,19 +770,16 @@ export function SvgComponent() {
     animatedProps,
     gradientAnimatedProps,
     props,
-    onLongPressGestureEvent,
     gestureEnabled,
-    longPressGestureHandlerProps,
+    gesture,
   } = useContext(InternalContext);
+
+  // Ensure we don't attach gestures when disabled, matching the old
+  // `LongPressGestureHandler enabled={gestureEnabled}` behavior.
+  const resolvedGesture = gestureEnabled ? gesture : Gesture.Simultaneous();
+
   return (
-    <LongPressGestureHandler
-      enabled={gestureEnabled}
-      maxDist={100000}
-      minDurationMs={0}
-      shouldCancelWhenOutside={false}
-      {...longPressGestureHandlerProps}
-      {...{ onGestureEvent: onLongPressGestureEvent }}
-    >
+    <GestureDetector gesture={resolvedGesture}>
       <Animated.View>
         <Svg
           height={height + 20} // temporary fix for clipped chart
@@ -746,6 +810,6 @@ export function SvgComponent() {
           />
         </Svg>
       </Animated.View>
-    </LongPressGestureHandler>
+    </GestureDetector>
   );
 }
